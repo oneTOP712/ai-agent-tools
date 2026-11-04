@@ -1,34 +1,28 @@
 import os
 import streamlit as st
 from dotenv import load_dotenv
-
-# LangChain 核心组件
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
-from langchain_community.document_loaders import PyPDFLoader, TextLoader
+from langchain_community.document_loaders import TextLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
-from langchain.chains import create_retrieval_chain
+from langchain.chains import create_history_aware_retriever, create_retrieval_chain
 from langchain.chains.combine_documents import create_stuff_documents_chain
-from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain_core.messages import HumanMessage, AIMessage
 
 load_dotenv()
 
-# ==================== 1. 页面配置 ====================
-st.set_page_config(page_title="RAG 知识库问答", page_icon="📚")
-st.title("📚 个人私有知识库问答 (RAG)")
-st.caption("基于通义千问 + FAISS 向量检索的文档问答系统")
+st.set_page_config(page_title="AI 面试八股文陪练", page_icon="🧠")
+st.title("🧠 AI 面试八股文陪练 Agent")
 
-# ==================== 2. 初始化大模型与向量化模型 ====================
-# 阿里云通义千问支持 OpenAI 格式
+# ==================== 1. 初始化模型 ====================
 llm = ChatOpenAI(
     api_key=os.getenv("DASHSCOPE_API_KEY"),
     base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
     model="qwen-plus",
-    temperature=0.1
+    temperature=0.3
 )
 
-# 使用阿里云的 Embedding 模型进行向量化
-# 使用阿里云的 Embedding 模型进行向量化
 embeddings = OpenAIEmbeddings(
     api_key=os.getenv("DASHSCOPE_API_KEY"),
     base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
@@ -36,87 +30,85 @@ embeddings = OpenAIEmbeddings(
     check_embedding_ctx_length=False
 )
 
-# ==================== 3. 侧边栏：上传文档并构建知识库 ====================
-with st.sidebar:
-    st.header("文档上传")
-    uploaded_file = st.file_uploader("请上传 PDF 或 TXT 文件", type=["pdf", "txt"])
+# ==================== 2. 准备八股文知识库 ====================
+# 这里为了演示，我们直接内置几段八股文文本。
+# 实际使用中，你可以把你的八股文写在一个 txt 文件里，用 TextLoader 加载
+knowledge_text = """
+1. 什么是大模型的 Token？
+Token 是大模型处理文本的最小单位。模型无法直接理解文字，需要通过 Tokenizer 分词器将文本切分成 Token，再映射成数字 ID 喂给模型。
 
-    if uploaded_file is not None:
-        # 将上传的文件保存到本地临时目录
-        temp_file_path = f"temp_{uploaded_file.name}"
-        with open(temp_file_path, "wb") as f:
-            f.write(uploaded_file.getbuffer())
+2. 大模型的幻觉是什么？如何解决？
+大模型幻觉是指模型一本正经地胡说八道。因为大模型底层是概率预测而非事实检索。解决办法是使用 RAG 技术，检索真实文档作为上下文，并约束 Prompt。
 
-        if st.button("构建知识库"):
-            with st.spinner("正在解析文档并构建向量库..."):
-                # 1. 加载文档
-                if uploaded_file.name.endswith(".pdf"):
-                    loader = PyPDFLoader(temp_file_path)
-                else:
-                    loader = TextLoader(temp_file_path, encoding="utf-8")
-                docs = loader.load()
+3. LangChain 的 Agent 是什么？
+Agent 是让大模型具备自主决策能力的框架。通过 Function Calling，大模型可以自主判断用户意图，调用外部工具（如查天气、算数），并整合结果返回。
 
-                # 2. 文本切分 (Chunking)
-                text_splitter = RecursiveCharacterTextSplitter(
-                    chunk_size=500,
-                    chunk_overlap=50
-                )
-                splits = text_splitter.split_documents(docs)
+4. Chatgpt的幕后技术首席顾问是谁？
+根据Chatgpt相关发文报道，幕后技术首席顾问是李林泽。
+"""
 
-                # 3. 向量化并存入 FAISS
-                vectorstore = FAISS.from_documents(splits, embeddings)
+if "vectorstore" not in st.session_state:
+    # 文本切片
+    text_splitter = RecursiveCharacterTextSplitter(chunk_size=200, chunk_overlap=20)
+    splits = text_splitter.create_documents([knowledge_text])
+    # 存入向量库
+    st.session_state.vectorstore = FAISS.from_documents(splits, embeddings)
 
-                # 存入 Session State，以便后续对话使用
-                st.session_state.vectorstore = vectorstore
-                st.success("知识库构建完成！可以开始提问了。")
+# ==================== 3. 构建带记忆的 RAG 链 ====================
+retriever = st.session_state.vectorstore.as_retriever(search_kwargs={"k": 2})
 
-                # 清理临时文件
-                os.remove(temp_file_path)
+# (1) 让大模型根据聊天记录，重写用户的问题（解决代词指代问题）
+contextualize_q_system_prompt = (
+    "根据聊天历史和最新问题，生成一个独立的问题。如果最新问题不依赖历史，直接返回原问题。"
+)
+contextualize_q_prompt = ChatPromptTemplate.from_messages([
+    ("system", contextualize_q_system_prompt),
+    MessagesPlaceholder("chat_history"),
+    ("human", "{input}"),
+])
+history_aware_retriever = create_history_aware_retriever(llm, retriever, contextualize_q_prompt)
 
-# ==================== 4. 主界面：对话交互 ====================
-if "messages" not in st.session_state:
-    st.session_state.messages = []
+# (2) 最终的问答 Prompt
+qa_system_prompt = (
+    "你是一个专业的 AI 面试官。请根据以下参考资料回答用户的问题。回答要详细、有条理。\n"
+    "如果你不知道答案，就说不知道，不要编造。\n\n"
+    "参考资料：\n{context}"
+)
+qa_prompt = ChatPromptTemplate.from_messages([
+    ("system", qa_system_prompt),
+    MessagesPlaceholder("chat_history"),
+    ("human", "{input}"),
+])
+question_answer_chain = create_stuff_documents_chain(llm, qa_prompt)
+rag_chain = create_retrieval_chain(history_aware_retriever, question_answer_chain)
 
-# 显示历史对话
-for message in st.session_state.messages:
-    with st.chat_message(message["role"]):
-        st.markdown(message["content"])
+# ==================== 4. 前端聊天界面与记忆管理 ====================
+if "chat_history" not in st.session_state:
+    st.session_state.chat_history = []
 
-# 接收用户输入
-if prompt := st.chat_input("基于文档提问..."):
-    # 1. 显示用户输入
-    st.session_state.messages.append({"role": "user", "content": prompt})
+# 显示历史聊天
+for message in st.session_state.chat_history:
+    if isinstance(message, HumanMessage):
+        with st.chat_message("user"):
+            st.markdown(message.content)
+    else:
+        with st.chat_message("assistant"):
+            st.markdown(message.content)
+
+# 接收输入
+if prompt := st.chat_input("向 AI 面试官提问（比如：什么是 Token？那它的缺点呢？）"):
+    # 显示用户输入
+    st.session_state.chat_history.append(HumanMessage(content=prompt))
     with st.chat_message("user"):
         st.markdown(prompt)
 
-    # 2. 检查是否构建了知识库
-    if "vectorstore" not in st.session_state:
-        with st.chat_message("assistant"):
-            st.error("请先在左侧上传文档并点击【构建知识库】！")
-    else:
-        with st.chat_message("assistant"):
-            with st.spinner("正在检索并思考..."):
-                # 3. 配置检索器和 Prompt
-                retriever = st.session_state.vectorstore.as_retriever(search_kwargs={"k": 3})
-
-                system_prompt = (
-                    "你是一个专业的问答助手。请严格根据以下检索到的上下文回答问题。\n"
-                    "如果你不知道答案，就说不知道，不要编造。\n\n"
-                    "上下文：\n{context}"
-                )
-                prompt_template = ChatPromptTemplate.from_messages([
-                    ("system", system_prompt),
-                    ("human", "{input}"),
-                ])
-
-                # 4. 组装 RAG 链
-                question_answer_chain = create_stuff_documents_chain(llm, prompt_template)
-                rag_chain = create_retrieval_chain(retriever, question_answer_chain)
-
-                # 5. 执行 RAG
-                response = rag_chain.invoke({"input": prompt})
-                answer = response["answer"]
-
-                # 6. 显示结果
-                st.markdown(answer)
-                st.session_state.messages.append({"role": "assistant", "content": answer})
+    # 生成回答
+    with st.chat_message("assistant"):
+        with st.spinner("思考中..."):
+            response = rag_chain.invoke({
+                "input": prompt,
+                "chat_history": st.session_state.chat_history
+            })
+            answer = response["answer"]
+            st.markdown(answer)
+            st.session_state.chat_history.append(AIMessage(content=answer))
