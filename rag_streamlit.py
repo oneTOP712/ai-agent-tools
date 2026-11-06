@@ -15,16 +15,24 @@ load_dotenv()
 st.set_page_config(page_title="AI 面试八股文陪练", page_icon="🧠")
 st.title("🧠 AI 面试八股文陪练 Agent")
 
+# ==================== 兼容本地和云端的密钥读取 ====================
+try:
+    dashscope_key = os.getenv("DASHSCOPE_API_KEY") or st.secrets["DASHSCOPE_API_KEY"]
+    qweather_key = os.getenv("QWEATHER_API_KEY") or st.secrets["QWEATHER_API_KEY"]
+except Exception:
+    dashscope_key = os.getenv("DASHSCOPE_API_KEY")
+    qweather_key = os.getenv("QWEATHER_API_KEY")
+
 # ==================== 1. 初始化模型 ====================
 llm = ChatOpenAI(
-    api_key=os.getenv("DASHSCOPE_API_KEY"),
+    api_key=dashscope_key,  # ← 改成了刚才获取的变量
     base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
     model="qwen-plus",
     temperature=0.3
 )
 
 embeddings = OpenAIEmbeddings(
-    api_key=os.getenv("DASHSCOPE_API_KEY"),
+    api_key=dashscope_key,  # ← 改成了刚才获取的变量
     base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
     model="text-embedding-v3",
     check_embedding_ctx_length=False
@@ -42,9 +50,6 @@ Token 是大模型处理文本的最小单位。模型无法直接理解文字�
 
 3. LangChain 的 Agent 是什么？
 Agent 是让大模型具备自主决策能力的框架。通过 Function Calling，大模型可以自主判断用户意图，调用外部工具（如查天气、算数），并整合结果返回。
-
-4. Chatgpt的幕后技术首席顾问是谁？
-根据Chatgpt相关发文报道，幕后技术首席顾问是李林泽。
 """
 
 if "vectorstore" not in st.session_state:
