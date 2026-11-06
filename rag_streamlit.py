@@ -16,12 +16,15 @@ st.set_page_config(page_title="AI 面试八股文陪练", page_icon="🧠")
 st.title("🧠 AI 面试八股文陪练 Agent")
 
 # ==================== 兼容本地和云端的密钥读取 ====================
-try:
-    dashscope_key = os.getenv("DASHSCOPE_API_KEY") or st.secrets["DASHSCOPE_API_KEY"]
-    qweather_key = os.getenv("QWEATHER_API_KEY") or st.secrets["QWEATHER_API_KEY"]
-except Exception:
-    dashscope_key = os.getenv("DASHSCOPE_API_KEY")
-    qweather_key = os.getenv("QWEATHER_API_KEY")
+dashscope_key = os.getenv("DASHSCOPE_API_KEY")
+qweather_key = os.getenv("QWEATHER_API_KEY")
+
+if not dashscope_key:
+    try:
+        dashscope_key = st.secrets["DASHSCOPE_API_KEY"]
+        qweather_key = st.secrets["QWEATHER_API_KEY"]
+    except Exception as e:
+        st.error(f"云端未找到 API Key，请检查 Secrets 配置：{e}")
 
 # ==================== 1. 初始化模型 ====================
 llm = ChatOpenAI(
