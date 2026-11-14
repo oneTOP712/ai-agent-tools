@@ -61,11 +61,21 @@ if "vectorstore" not in st.session_state:
     splits = text_splitter.create_documents([knowledge_text])
     # 存入向量库
     st.session_state.vectorstore = FAISS.from_documents(splits, embeddings)
-
+    st.session_state.splits = splits
 # ==================== 3. 构建带记忆的 RAG 链 ====================
-retriever = st.session_state.vectorstore.as_retriever(search_kwargs={"k": 2})
+from langchain_community.retrievers import BM25Retriever
+from langchain.retrievers import EnsembleRetriever
 
-# (1) 让大模型根据聊天记录，重写用户的问题（解决代词指代问题）
+faiss_retriever = st.session_state.vectorstore.as_retriever(search_kwargs={"k": 2})
+
+bm25_retriever = BM25Retriever.from_documents(st.session_state.splits)
+bm25_retriever.k = 2
+
+ensemble_retriever = EnsembleRetriever(
+    retrievers=[bm25_retriever, faiss_retriever],
+    weights=[0.5, 0.5]
+)
+# ==================== 构建多轮对话重写 Prompt ====================
 contextualize_q_system_prompt = (
     "根据聊天历史和最新问题，生成一个独立的问题。如果最新问题不依赖历史，直接返回原问题。"
 )
@@ -74,7 +84,8 @@ contextualize_q_prompt = ChatPromptTemplate.from_messages([
     MessagesPlaceholder("chat_history"),
     ("human", "{input}"),
 ])
-history_aware_retriever = create_history_aware_retriever(llm, retriever, contextualize_q_prompt)
+
+history_aware_retriever = create_history_aware_retriever(llm, ensemble_retriever, contextualize_q_prompt)
 
 # (2) 最终的问答 Prompt
 qa_system_prompt = (
